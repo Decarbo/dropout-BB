@@ -201,7 +201,7 @@ exports.registerStudent = async (req, res) => {
 
 	try {
 		const exists = await Student.findOne({
-			$or: [{ email }, { rollNo }, { registrationNo }],
+			$or: [{ email }, { rollNo }],
 		});
 		if (exists) {
 			return res.status(400).json({
