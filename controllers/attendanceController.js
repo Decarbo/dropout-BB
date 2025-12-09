@@ -1,212 +1,672 @@
-// controllers/attendanceController.js
-const Attendance = require('../models/Attendance');
+// controllers/assignmentController.js
+const Assignment = require('../models/Assignment');
+const AssignmentSubmission = require('../models/AssignmentSubmission');
+const Teacher = require('../models/Teacher');
 const Student = require('../models/Student');
-const mongoose = require('mongoose');
+const path = require('path');
+const fs = require('fs');
 
 /**
- * GET /api/students/attendance
- * Auth required (protect middleware should set req.user.id)
- * Returns:
- * {
- *  overallPercentage: number,
- *  totalClasses: number,
- *  present: number,
- *  absent: number,
- *  late: number,
- *  monthly: [{ month: 'Sep', percent: 91 }, ...],
- *  subjects: [{ name: 'DB', percent: 92 }, ...],
- *  heatmap: [{ date: '2025-12-01', value: 1|0.5|0 }, ...] // last 90 days
- * }
+ * Upload a new assignment (Teacher only)
  */
-exports.getStudentAttendance = async (req, res) => {
+exports.createAssignment = async (req, res) => {
   try {
-    const studentId = req.user.id;
+    const teacherId = req.user.id;
+    const {
+      title,
+      description,
+      subjectCode,
+      subjectName,
+      semester,
+      section,
+      batch,
+      department,
+      totalMarks,
+      dueDate,
+      instructions,
+      tags,
+      allowedFormats
+    } = req.body;
 
-    // 1) get student (for fallback data and subject names)
-    const student = await Student.findById(studentId).lean();
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
-
-    // 2) Build date range for last 90 days
-    const today = new Date();
-    const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59));
-    const start = new Date(end);
-    start.setDate(start.getDate() - 89); // inclusive 90 days
-
-    // 3) Aggregate attendance records for last 90 days
-    const agg = await Attendance.aggregate([
-      { $match: { student: mongoose.Types.ObjectId(studentId), date: { $gte: start, $lte: end } } },
-      // normalize date to yyyy-mm-dd string (UTC) for grouping
-      {
-        $addFields: {
-          dateStr: {
-            $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "UTC" }
-          }
-        }
-      },
-      {
-        $group: {
-          _id: { dateStr: "$dateStr", subjectCode: "$subjectCode" },
-          counts: { $push: "$status" },
-          subjectName: { $first: "$subjectName" }
-        }
-      },
-      // produce counts per day/subject
-      {
-        $project: {
-          dateStr: "$_id.dateStr",
-          subjectCode: "$_id.subjectCode",
-          subjectName: "$subjectName",
-          present: { $size: { $filter: { input: "$counts", as: "s", cond: { $eq: ["$$s", "present"] } } } },
-          late: { $size: { $filter: { input: "$counts", as: "s", cond: { $eq: ["$$s", "late"] } } } },
-          absent: { $size: { $filter: { input: "$counts", as: "s", cond: { $eq: ["$$s", "absent"] } } } },
-        }
-      }
-    ]);
-
-    // convert agg to maps for quick summarization
-    const dayMap = {}; // dateStr -> aggregated status (prefer present if any present, else late if any late, else absent)
-    const subjectMap = {}; // subjectCode -> { present, total }
-    let present = 0, absent = 0, late = 0, totalClasses = 0;
-
-    // If there are attendance entries, compute exact numbers
-    if (agg.length > 0) {
-      // Each group above is per day-subject; we count each as a class occurrence
-      for (const row of agg) {
-        totalClasses += 1;
-        if (row.present > 0) {
-          present += 1;
-          dayMap[row.dateStr] = 1;
-        } else if (row.late > 0) {
-          late += 1;
-          // if that day already marked present for some subject, keep max (1 > 0.5)
-          dayMap[row.dateStr] = Math.max(dayMap[row.dateStr] || 0, 0.5);
-        } else {
-          absent += 1;
-          dayMap[row.dateStr] = Math.max(dayMap[row.dateStr] || 0, 0);
-        }
-
-        const code = row.subjectCode || 'general';
-        if (!subjectMap[code]) subjectMap[code] = { name: row.subjectName || code, present: 0, total: 0 };
-        subjectMap[code].total += 1;
-        if (row.present > 0) subjectMap[code].present += 1;
-        if (row.late > 0) subjectMap[code].present += 0.5; // treat late as half present for percent
-      }
-
-      const overallPercentage = totalClasses > 0 ? Math.round((present + late * 0.5) / totalClasses * 100) : 0;
-
-      // monthly trend — last 3 months aggregated
-      const monthlyBuckets = {}; // "YYYY-MM" -> {present, total}
-      for (const [dateStr, val] of Object.entries(dayMap)) {
-        const [y, m] = dateStr.split('-');
-        const key = `${y}-${m}`; // e.g., 2025-12
-        const p = val === 1 ? 1 : val === 0.5 ? 0.5 : 0;
-        monthlyBuckets[key] = monthlyBuckets[key] || { present: 0, total: 0 };
-        monthlyBuckets[key].present += p;
-        monthlyBuckets[key].total += 1;
-      }
-
-      const monthly = Object.entries(monthlyBuckets)
-        .sort((a, b) => a[0].localeCompare(b[0]))
-        .slice(-3)
-        .map(([k, v]) => {
-          const monthNumber = Number(k.split('-')[1]) - 1;
-          const monthName = new Date(Number(k.split('-')[0]), monthNumber, 1).toLocaleString('en-US', { month: 'short' });
-          const percent = v.total ? Math.round((v.present / v.total) * 100) : 0;
-          return { month: monthName, percent };
-        });
-
-      // subjects array
-      const subjects = Object.values(subjectMap).map(s => ({
-        name: s.name,
-        percent: s.total ? Math.round((s.present / s.total) * 100) : 0
-      }));
-
-      // heatmap for last 90 days (fill missing days with absent(0))
-      const heatmap = [];
-      const cur = new Date(start);
-      while (cur <= end) {
-        const dateStr = cur.toISOString().split('T')[0];
-        let value = 0; // default absent/no record
-        if (dayMap[dateStr] === 1) value = 1;
-        else if (dayMap[dateStr] === 0.5) value = 0.5;
-        else if (dayMap[dateStr] === 0) value = 0;
-        heatmap.push({ date: dateStr, value });
-        cur.setDate(cur.getDate() + 1);
-      }
-
-      return res.json({
-        success: true,
-        overallPercentage,
-        totalClasses,
-        present,
-        absent,
-        late,
-        monthly,
-        subjects,
-        heatmap,
+    // Validate required fields
+    if (!title || !subjectCode || !subjectName || !semester || !section || !batch || !department || !dueDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: title, subjectCode, subjectName, semester, section, batch, department, dueDate'
       });
     }
 
-    // FALLBACK: no attendance records — use Student.totalClasses / attendedClasses
-    // Use student.academics to produce subject-level dummy percentages if available
-    const fallbackTotal = student.totalClasses || 0;
-    const fallbackPresent = student.attendedClasses || 0;
-    const fallbackAbsent = Math.max(0, fallbackTotal - fallbackPresent);
-    const fallbackLate = 0;
-    const fallbackOverall = fallbackTotal > 0 ? Math.round((fallbackPresent / fallbackTotal) * 100) : 0;
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Assignment file is required'
+      });
+    }
 
-    // subject percentages from student.academics (best-effort): treat all subjects as fully present
-    const subjMapFallback = {};
-    if (Array.isArray(student.academics)) {
-      for (const sem of student.academics) {
-        for (const subj of sem.subjects || []) {
-          if (!subjMapFallback[subj.subjectCode]) {
-            subjMapFallback[subj.subjectCode] = { name: subj.subjectName || subj.subjectCode, present: 1, total: 1 };
-          } else {
-            subjMapFallback[subj.subjectCode].present += 1;
-            subjMapFallback[subj.subjectCode].total += 1;
-          }
+    // Get teacher info to verify they teach this subject
+    const teacher = await Teacher.findById(teacherId);
+    if (!teacher) {
+      return res.status(404).json({
+        success: false,
+        message: 'Teacher not found'
+      });
+    }
+
+    // Verify teacher teaches this subject (optional but recommended)
+    const teachesSubject = teacher.subjects.some(subject =>
+      subject.subjectCode === subjectCode &&
+      subject.semester === parseInt(semester) &&
+      subject.section === section &&
+      subject.batch === batch
+    );
+
+    if (!teachesSubject) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not assigned to teach this subject/section'
+      });
+    }
+
+    // Count students in this class
+    const studentCount = await Student.countDocuments({
+      department,
+      semester: parseInt(semester),
+      section,
+      batch
+    });
+
+    // Create assignment
+    const assignment = await Assignment.create({
+      title,
+      description: description || '',
+      subjectCode,
+      subjectName,
+      semester: parseInt(semester),
+      section,
+      batch,
+      department,
+      createdBy: teacherId,
+      fileUrl: `/uploads/assignments/${req.file.filename}`,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      fileType: req.file.mimetype,
+      totalMarks: totalMarks || 100,
+      dueDate: new Date(dueDate),
+      instructions: instructions || '',
+      tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
+      allowedFormats: allowedFormats ? allowedFormats.split(',').map(format => format.trim()) : ['pdf', 'doc', 'docx'],
+      totalStudents: studentCount
+    });
+
+    // Update teacher's assignments count
+    await Teacher.findByIdAndUpdate(teacherId, {
+      $inc: { assignmentsCreated: 1 },
+      $push: {
+        uploadedFiles: {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          path: req.file.path,
+          subjectCode,
+          semester: parseInt(semester),
+          section,
+          batch,
+          uploadedAt: new Date(),
+          processed: false
         }
       }
-    }
-    const subjects = Object.values(subjMapFallback).map(s => ({
-      name: s.name,
-      percent: s.total ? Math.round((s.present / s.total) * 100) : 0
-    }));
-
-    // monthly trend (simple fallback: repeat overall for last 3 months)
-    const months = [];
-    for (let i = 2; i >= 0; i--) {
-      const d = new Date();
-      d.setMonth(d.getMonth() - i);
-      months.push({ month: d.toLocaleString('en-US', { month: 'short' }), percent: fallbackOverall });
-    }
-
-    // heatmap fallback: mark days as present proportionally to overall %
-    const heatmap = [];
-    const curFallback = new Date(start);
-    while (curFallback <= end) {
-      const dateStr = curFallback.toISOString().split('T')[0];
-      // simple pseudo-random filling based on overall% to visually populate
-      const rand = Math.random() * 100;
-      const value = rand < fallbackOverall ? 1 : 0;
-      heatmap.push({ date: dateStr, value });
-      curFallback.setDate(curFallback.getDate() + 1);
-    }
-
-    return res.json({
-      success: true,
-      overallPercentage: fallbackOverall,
-      totalClasses: fallbackTotal,
-      present: fallbackPresent,
-      absent: fallbackAbsent,
-      late: fallbackLate,
-      monthly: months,
-      subjects,
-      heatmap,
     });
+
+    res.status(201).json({
+      success: true,
+      message: 'Assignment created successfully',
+      data: {
+        assignment: {
+          id: assignment._id,
+          title: assignment.title,
+          subjectCode: assignment.subjectCode,
+          subjectName: assignment.subjectName,
+          semester: assignment.semester,
+          section: assignment.section,
+          dueDate: assignment.dueDate,
+          totalMarks: assignment.totalMarks,
+          fileUrl: assignment.fileUrl,
+          totalStudents: assignment.totalStudents
+        }
+      }
+    });
+
   } catch (err) {
-    console.error('attendance error', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Create assignment error:', err);
+
+    // Delete uploaded file if there was an error
+    if (req.file) {
+      fs.unlink(req.file.path, (unlinkErr) => {
+        if (unlinkErr) console.error('Failed to delete file:', unlinkErr);
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
+
+/**
+ * Get assignments for a teacher
+ */
+exports.getTeacherAssignments = async (req, res) => {
+  try {
+    const teacherId = req.user.id;
+    const { status, subjectCode, semester, page = 1, limit = 10 } = req.query;
+
+    const query = { createdBy: teacherId };
+
+    if (status) query.status = status;
+    if (subjectCode) query.subjectCode = subjectCode;
+    if (semester) query.semester = parseInt(semester);
+
+    const assignments = await Assignment.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .populate('createdBy', 'name employeeId')
+      .lean();
+
+    const total = await Assignment.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: {
+        assignments,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('Get teacher assignments error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/**
+ * Get assignments for a student
+ */
+exports.getStudentAssignments = async (req, res) => {
+  try {
+    const studentId = req.user.id;
+    const { status, subjectCode, page = 1, limit = 10 } = req.query;
+
+    // Get student details
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+
+    // Build query based on student's class
+    const query = {
+      department: student.department,
+      semester: student.semester,
+      section: student.section,
+      batch: student.batch,
+      status: 'active'
+    };
+
+    if (subjectCode) query.subjectCode = subjectCode;
+
+    const assignments = await Assignment.find(query)
+      .sort({ dueDate: 1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .populate('createdBy', 'name employeeId')
+      .lean();
+
+    // Check submission status for each assignment
+    const assignmentsWithStatus = await Promise.all(
+      assignments.map(async (assignment) => {
+        const submission = await AssignmentSubmission.findOne({
+          assignment: assignment._id,
+          student: studentId
+        });
+
+        return {
+          ...assignment,
+          submissionStatus: submission ? submission.status : 'pending',
+          submittedAt: submission ? submission.submittedAt : null,
+          marksObtained: submission ? submission.marksObtained : null,
+          dueStatus: new Date() > new Date(assignment.dueDate) ? 'overdue' : 'pending'
+        };
+      })
+    );
+
+    const total = await Assignment.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: {
+        student: {
+          name: student.name,
+          rollNo: student.rollNo,
+          department: student.department,
+          semester: student.semester,
+          section: student.section
+        },
+        assignments: assignmentsWithStatus,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('Get student assignments error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/**
+ * Submit assignment (Student)
+ */
+exports.submitAssignment = async (req, res) => {
+  try {
+    const studentId = req.user.id;
+    const { assignmentId, studentNotes } = req.body;
+
+    if (!assignmentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Assignment ID is required'
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Submission file is required'
+      });
+    }
+
+    // Check if assignment exists
+    const assignment = await Assignment.findById(assignmentId);
+    if (!assignment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assignment not found'
+      });
+    }
+
+    // Check if student belongs to this assignment's class
+    const student = await Student.findById(studentId);
+    if (!student ||
+        student.department !== assignment.department ||
+        student.semester !== assignment.semester ||
+        student.section !== assignment.section ||
+        student.batch !== assignment.batch) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not enrolled in this class'
+      });
+    }
+
+    // Check if already submitted
+    const existingSubmission = await AssignmentSubmission.findOne({
+      assignment: assignmentId,
+      student: studentId
+    });
+
+    const submittedAt = new Date();
+    const isLate = submittedAt > assignment.dueDate;
+    const status = isLate ? 'late' : 'submitted';
+
+    if (existingSubmission) {
+      // Update existing submission (re-submission)
+      const previousVersion = {
+        fileUrl: existingSubmission.fileUrl,
+        fileName: existingSubmission.fileName,
+        submittedAt: existingSubmission.submittedAt
+      };
+
+      existingSubmission.fileUrl = `/uploads/submissions/${req.file.filename}`;
+      existingSubmission.fileName = req.file.originalname;
+      existingSubmission.fileSize = req.file.size;
+      existingSubmission.fileType = req.file.mimetype;
+      existingSubmission.submittedAt = submittedAt;
+      existingSubmission.status = status;
+      existingSubmission.resubmissionCount += 1;
+      existingSubmission.studentNotes = studentNotes || '';
+      existingSubmission.previousVersions.push(previousVersion);
+
+      await existingSubmission.save();
+    } else {
+      // Create new submission
+      await AssignmentSubmission.create({
+        assignment: assignmentId,
+        student: studentId,
+        fileUrl: `/uploads/submissions/${req.file.filename}`,
+        fileName: req.file.originalname,
+        fileSize: req.file.size,
+        fileType: req.file.mimetype,
+        submittedAt: submittedAt,
+        status: status,
+        studentNotes: studentNotes || '',
+        totalMarks: assignment.totalMarks
+      });
+
+      // Update assignment submission count
+      await Assignment.findByIdAndUpdate(assignmentId, {
+        $inc: { submissionsCount: 1 }
+      });
+    }
+
+    // Update student's assignments array
+    await Student.findByIdAndUpdate(studentId, {
+      $addToSet: {
+        assignments: {
+          assignment: assignmentId,
+          status: status,
+          submittedAt: submittedAt
+        }
+      }
+    });
+
+    res.json({
+      success: true,
+      message: isLate ? 'Assignment submitted (late)' : 'Assignment submitted successfully',
+      data: {
+        submissionId: existingSubmission ? existingSubmission._id : null,
+        submittedAt,
+        isLate,
+        dueDate: assignment.dueDate
+      }
+    });
+
+  } catch (err) {
+    console.error('Submit assignment error:', err);
+
+    // Delete uploaded file if there was an error
+    if (req.file) {
+      fs.unlink(req.file.path, (unlinkErr) => {
+        if (unlinkErr) console.error('Failed to delete file:', unlinkErr);
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/**
+ * Get submissions for an assignment (Teacher)
+ */
+exports.getAssignmentSubmissions = async (req, res) => {
+  try {
+    const teacherId = req.user.id;
+    const { assignmentId } = req.params;
+    const { status, page = 1, limit = 20 } = req.query;
+
+    // Verify teacher owns this assignment
+    const assignment = await Assignment.findOne({
+      _id: assignmentId,
+      createdBy: teacherId
+    });
+
+    if (!assignment) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to view submissions for this assignment'
+      });
+    }
+
+    const query = { assignment: assignmentId };
+    if (status) query.status = status;
+
+    const submissions = await AssignmentSubmission.find(query)
+      .populate('student', 'name rollNo email')
+      .populate('gradedBy', 'name employeeId')
+      .sort({ submittedAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .lean();
+
+    const total = await AssignmentSubmission.countDocuments(query);
+
+    // Calculate statistics
+    const gradedSubmissions = submissions.filter(s => s.marksObtained);
+    const averageMarks = gradedSubmissions.length > 0
+      ? gradedSubmissions.reduce((sum, s) => sum + s.marksObtained, 0) / gradedSubmissions.length
+      : 0;
+
+    res.json({
+      success: true,
+      data: {
+        assignment: {
+          id: assignment._id,
+          title: assignment.title,
+          subjectCode: assignment.subjectCode,
+          totalMarks: assignment.totalMarks,
+          dueDate: assignment.dueDate,
+          totalStudents: assignment.totalStudents
+        },
+        submissions,
+        statistics: {
+          totalSubmissions: total,
+          gradedCount: gradedSubmissions.length,
+          pendingCount: total - gradedSubmissions.length,
+          averageMarks: Math.round(averageMarks * 100) / 100,
+          highestMarks: gradedSubmissions.length > 0 ? Math.max(...gradedSubmissions.map(s => s.marksObtained)) : 0,
+          lowestMarks: gradedSubmissions.length > 0 ? Math.min(...gradedSubmissions.map(s => s.marksObtained)) : 0
+        },
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('Get assignment submissions error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/**
+ * Grade a submission (Teacher)
+ */
+exports.gradeSubmission = async (req, res) => {
+  try {
+    const teacherId = req.user.id;
+    const { submissionId } = req.params;
+    const { marksObtained, feedback, grade } = req.body;
+
+    if (!marksObtained) {
+      return res.status(400).json({
+        success: false,
+        message: 'Marks are required'
+      });
+    }
+
+    // Get submission with assignment details
+    const submission = await AssignmentSubmission.findById(submissionId)
+      .populate('assignment');
+
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Verify teacher owns this assignment
+    if (submission.assignment.createdBy.toString() !== teacherId) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to grade this submission'
+      });
+    }
+
+    // Verify marks don't exceed total
+    if (marksObtained > submission.assignment.totalMarks) {
+      return res.status(400).json({
+        success: false,
+        message: `Marks cannot exceed ${submission.assignment.totalMarks}`
+      });
+    }
+
+    // Update submission
+    submission.marksObtained = marksObtained;
+    submission.feedback = feedback || '';
+    submission.grade = grade || '';
+    submission.gradedBy = teacherId;
+    submission.gradedAt = new Date();
+    submission.status = 'graded';
+
+    await submission.save();
+
+    // Update student's assignment record
+    await Student.updateOne(
+      { _id: submission.student, 'assignments.assignment': submission.assignment._id },
+      {
+        $set: {
+          'assignments.$.status': 'graded',
+          'assignments.$.marksObtained': marksObtained,
+          'assignments.$.feedback': feedback
+        }
+      }
+    );
+
+    // Update assignment statistics
+    await updateAssignmentStatistics(submission.assignment._id);
+
+    res.json({
+      success: true,
+      message: 'Submission graded successfully',
+      data: {
+        submission: {
+          id: submission._id,
+          marksObtained: submission.marksObtained,
+          totalMarks: submission.assignment.totalMarks,
+          grade: submission.grade,
+          gradedAt: submission.gradedAt
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('Grade submission error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/**
+ * Download assignment or submission file
+ */
+exports.downloadFile = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+
+    let filePath;
+
+    if (type === 'assignment') {
+      const assignment = await Assignment.findById(id);
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: 'Assignment not found'
+        });
+      }
+      filePath = path.join(__dirname, '..', assignment.fileUrl);
+    } else if (type === 'submission') {
+      const submission = await AssignmentSubmission.findById(id);
+      if (!submission) {
+        return res.status(404).json({
+          success: false,
+          message: 'Submission not found'
+        });
+      }
+      filePath = path.join(__dirname, '..', submission.fileUrl);
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid file type'
+      });
+    }
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        message: 'File not found'
+      });
+    }
+
+    const fileName = type === 'assignment'
+      ? `assignment-${id}-${path.basename(filePath)}`
+      : `submission-${id}-${path.basename(filePath)}`;
+
+    res.download(filePath, fileName);
+
+  } catch (err) {
+    console.error('Download file error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+/**
+ * Helper function to update assignment statistics
+ */
+async function updateAssignmentStatistics(assignmentId) {
+  try {
+    const submissions = await AssignmentSubmission.find({
+      assignment: assignmentId,
+      status: 'graded'
+    });
+
+    if (submissions.length > 0) {
+      const marks = submissions.map(s => s.marksObtained);
+      const average = marks.reduce((sum, mark) => sum + mark, 0) / marks.length;
+      const highest = Math.max(...marks);
+      const lowest = Math.min(...marks);
+
+      await Assignment.findByIdAndUpdate(assignmentId, {
+        averageMarks: Math.round(average * 100) / 100,
+        highestMarks: highest,
+        lowestMarks: lowest,
+        gradedCount: submissions.length
+      });
+    }
+  } catch (err) {
+    console.error('Update statistics error:', err);
+  }
+}

@@ -20,6 +20,16 @@ const attendanceRecordSchema = new mongoose.Schema(
 	{ _id: false }
 );
 
+// NEW: Warnings Schema
+const warningSchema = new mongoose.Schema(
+	{
+		reason: { type: String, required: true },
+		givenBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Teacher' },
+		date: { type: Date, default: Date.now },
+	},
+	{ _id: false }
+);
+
 const studentSchema = new mongoose.Schema(
 	{
 		name: { type: String, required: true, trim: true },
@@ -31,23 +41,46 @@ const studentSchema = new mongoose.Schema(
 		semester: { type: Number, required: true },
 		section: { type: String, required: true },
 
-		// Attendance Counters
+		// Attendance
 		totalClasses: { type: Number, default: 0 },
-		attendedClasses: { type: Number, default: 0 }, // present + late
+		attendedClasses: { type: Number, default: 0 },
 		presentCount: { type: Number, default: 0 },
 		lateCount: { type: Number, default: 0 },
 		absentCount: { type: Number, default: 0 },
 		attendancePercentage: { type: Number, default: 0 },
 
-		// History
 		attendanceRecords: { type: [attendanceRecordSchema], default: [] },
 
 		// Academics
 		academics: [
-			/* your existing schema */
+			{
+				semester: { type: Number, required: true },
+				subjects: [
+					{
+						subjectName: { type: String, required: true },
+						subjectCode: { type: String, required: true },
+						credits: { type: Number, required: true },
+						grade: {
+							type: String,
+							enum: ['O', 'A+', 'A', 'B+', 'B', 'C', 'F', 'Ab'],
+							required: true,
+						},
+						gradePoints: { type: Number },
+						marks: { type: Number, min: 0, max: 100 },
+					},
+				],
+				sgpa: { type: Number, min: 0, max: 10 },
+				totalCredits: Number,
+				earnedCredits: Number,
+				backlogsThisSem: { type: Number, default: 0 },
+			},
 		],
+		mentor: {
+			name: { type: String, default: null },
+			phone: { type: String, default: null },
+		},
 
-		// Quick access
+		// Dashboard quick fields
 		cgpa: { type: Number, default: 0 },
 		currentBacklogs: { type: Number, default: 0 },
 		totalBacklogsEver: { type: Number, default: 0 },
@@ -59,13 +92,14 @@ const studentSchema = new mongoose.Schema(
 		},
 		isAtRisk: { type: Boolean, default: false },
 		feePending: { type: Boolean, default: false },
+
+		// NEW: Warnings
+		warnings: { type: [warningSchema], default: [] },
+
 		registeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', required: true },
 		role: { type: String, default: 'student' },
 	},
 	{ timestamps: true }
 );
-
-// FINAL & PERFECT PRE-SAVE HOOK — THIS FIXES EVERYTHING
-
 
 module.exports = mongoose.model('Student', studentSchema);

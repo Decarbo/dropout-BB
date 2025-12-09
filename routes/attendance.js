@@ -89,13 +89,10 @@ router.post('/upload', protect, authorize('Teacher', 'HOD'), async (req, res) =>
 
 		if (bulkOps.length > 0) {
 			await Student.bulkWrite(bulkOps, { session });
+		}
 
-			// THIS IS THE MAGIC LINE — TRIGGERS THE PRE-SAVE HOOK
-			const updatedIds = Object.keys(studentUpdates);
-			const students = await Student.find({ _id: { $in: updatedIds } });
-			for (const student of students) {
-				await student.save(); // Recalculates percentage & risk level
-			}
+		if (attendanceRecordsToInsert.length > 0) {
+			await Attendance.insertMany(attendanceRecordsToInsert, { session });
 		}
 
 		await session.commitTransaction();
@@ -120,6 +117,8 @@ router.post('/upload', protect, authorize('Teacher', 'HOD'), async (req, res) =>
 		session.endSession();
 	}
 });
+
+
 
 // GET /api/attendance/my-history
 // → Only logged-in student can access their own data

@@ -72,98 +72,18 @@ router.patch('/:id/warning', protect, authorize('Teacher'), async (req, res) => 
 // });
 
 router.get('/me', protect, async (req, res) => {
-	try {
-		const student = await Student.findById(req.user.id).select('-password -otp -otpExpires');
-		if (!student) return res.status(404).json({ message: 'Student not found' });
+  try {
+    const student = await Student.findById(req.user.id).select('-password -otp -otpExpires');
+    if (!student) return res.status(404).json({ message: 'Student not found' });
 
-		res.json({ success: true, student });
-	} catch (err) {
-		res.status(500).json({ message: 'Server error' });
-	}
+    res.json({ success: true, student });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
 });
-// router.get('/all', protect, async (req, res) => {
-// 	try {
-// 		// Optional: Restrict to Admin & Teacher only
-// 		if (!['Admin', 'Teacher', 'HOD'].includes(req.user.role)) {
-// 			return res.status(403).json({ success: false, message: 'Access denied' });
-// 		}
-
-// 		const page = parseInt(req.query.page) || 1;
-// 		const limit = parseInt(req.query.limit) || 20;
-// 		const search = req.query.search?.toString().trim() || '';
-
-// 		// Build search query
-// 		const query = search
-// 			? {
-// 					$or: [{ name: { $regex: search, $options: 'i' } }, { rollNo: { $regex: search, $options: 'i' } }, { email: { $regex: search, $options: 'i' } }, { batch: { $regex: search, $options: 'i' } }],
-// 			  }
-// 			: {};
-
-// 		const total = await Student.countDocuments(query);
-// 		const students = await Student.find(query)
-// 			.select('name rollNo email department semester section batch attendancePercentage cgpa riskLevel')
-// 			.sort({ rollNo: 1 })
-// 			.skip((page - 1) * limit)
-// 			.limit(limit)
-// 			.lean();
-
-// 		res.json({
-// 			success: true,
-// 			data: {
-// 				students,
-// 				pagination: {
-// 					page,
-// 					pages: Math.ceil(total / limit),
-// 					total,
-// 					limit,
-// 				},
-// 				filters: search ? `Search: "${search}"` : 'All Students',
-// 			},
-// 		});
-// 	} catch (err) {
-// 		console.error('Fetch all students error:', err);
-// 		res.status(500).json({ success: false, message: 'Server error' });
-// 	}
-// });
-// router.get('/class', protect, async (req, res) => {
-//   const { semester, section, department } = req.query;
-//   const students = await Student.find({
-//     semester: Number(semester),
-//     section: section?.toString().toUpperCase(),
-//     department: department
-//   }).select('name rollNo _id').sort('rollNo');
-//   res.json({ success: true, students });
-// });
-// GET /api/students/class?semester=5&section=A&department=Computer%20Science
-router.get('/class', protect, async (req, res) => {
-	try {
-		const { semester, section, department } = req.query;
-
-		if (!semester || !section || !department) {
-			return res.status(400).json({ success: false, message: 'Missing parameters' });
-		}
-
-		const students = await Student.find({
-			semester: Number(semester),
-			section: section.toString().toUpperCase(),
-			department: department.toString(),
-		})
-			.select('name rollNo _id attendancePercentage')
-			.sort('rollNo');
-
-		res.json({
-			success: true,
-			count: students.length,
-			students,
-		});
-	} catch (err) {
-		console.error(err);
-		res.status(500).json({ success: false, message: 'Server error' });
-	}
-});
-// GET /api/students/all → Returns EVERYTHING
 router.get('/all', protect, async (req, res) => {
 	try {
+		// Optional: Restrict to Admin & Teacher only
 		if (!['Admin', 'Teacher', 'HOD'].includes(req.user.role)) {
 			return res.status(403).json({ success: false, message: 'Access denied' });
 		}
@@ -172,6 +92,7 @@ router.get('/all', protect, async (req, res) => {
 		const limit = parseInt(req.query.limit) || 20;
 		const search = req.query.search?.toString().trim() || '';
 
+		// Build search query
 		const query = search
 			? {
 					$or: [{ name: { $regex: search, $options: 'i' } }, { rollNo: { $regex: search, $options: 'i' } }, { email: { $regex: search, $options: 'i' } }, { batch: { $regex: search, $options: 'i' } }],
@@ -179,9 +100,8 @@ router.get('/all', protect, async (req, res) => {
 			: {};
 
 		const total = await Student.countDocuments(query);
-
 		const students = await Student.find(query)
-			.select('-password -__v -registeredBy -otp -otpExpires') // Exclude sensitive
+			.select('name rollNo email department semester section batch attendancePercentage cgpa riskLevel')
 			.sort({ rollNo: 1 })
 			.skip((page - 1) * limit)
 			.limit(limit)
@@ -204,5 +124,41 @@ router.get('/all', protect, async (req, res) => {
 		console.error('Fetch all students error:', err);
 		res.status(500).json({ success: false, message: 'Server error' });
 	}
+});
+// router.get('/class', protect, async (req, res) => {
+//   const { semester, section, department } = req.query;
+//   const students = await Student.find({
+//     semester: Number(semester),
+//     section: section?.toString().toUpperCase(),
+//     department: department
+//   }).select('name rollNo _id').sort('rollNo');
+//   res.json({ success: true, students });
+// });
+// GET /api/students/class?semester=5&section=A&department=Computer%20Science
+router.get('/class', protect, async (req, res) => {
+  try {
+    const { semester, section, department } = req.query;
+
+    if (!semester || !section || !department) {
+      return res.status(400).json({ success: false, message: 'Missing parameters' });
+    }
+
+    const students = await Student.find({
+      semester: Number(semester),
+      section: section.toString().toUpperCase(),
+      department: department.toString(),
+    })
+      .select('name rollNo _id attendancePercentage')
+      .sort('rollNo');
+
+    res.json({
+      success: true,
+      count: students.length,
+      students
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 });
 module.exports = router;
